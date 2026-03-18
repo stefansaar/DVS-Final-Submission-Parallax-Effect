@@ -1,0 +1,32 @@
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Large model/data files
+*.dylib
+*.so
+*.npy
+*.pt
+*.pth
+*.onnx
+
+# Video/image outputs (large)
+*.mov
+*.mp4
+*.avi
+
+# Generated outputs (can be reproduced)
+depth-mapper/depth_maps/
+depth-mapper/layers/
+
+# macOS
+.DS_Store
