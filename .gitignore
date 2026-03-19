@@ -28,5 +28,8 @@ env/
 depth-mapper/depth_maps/
 depth-mapper/layers/
 
+# Claude
+CLAUDE.md
+
 # macOS
 .DS_Store
