@@ -1,8 +1,11 @@
 # Parallax Effect — DVS Final Submission
 
+<img src="assets/Demo-2.gif" alt="Demo" width="800">
+
 Turn any 2D image into an interactive parallax scene driven by head tracking (webcam) or mouse movement.
 
 ## Setup
+
 
 ```bash
 pip install flask flask-sock numpy opencv-python-headless scikit-learn Pillow gradio_client
