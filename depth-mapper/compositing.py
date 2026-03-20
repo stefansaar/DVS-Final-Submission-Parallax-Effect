@@ -170,8 +170,21 @@ def composite(float_layers: list, shifts: list, h: int, w: int,
     canvas = np.zeros((h, w, 3), dtype=np.float32)
     coverage = np.zeros((h, w, 1), dtype=np.float32)
 
-    for (premul_rgb, alpha), (dx, dy) in zip(float_layers, shifts):
-        M = np.float32([[1, 0, dx], [0, 1, dy]])
+    for (premul_rgb, alpha), shift in zip(float_layers, shifts):
+        if len(shift) == 3:
+            dx, dy, scale = shift
+        else:
+            dx, dy = shift
+            scale = 1.0
+
+        if scale != 1.0:
+            cx, cy = w / 2, h / 2
+            M = np.float32([
+                [scale, 0, dx + cx * (1 - scale)],
+                [0, scale, dy + cy * (1 - scale)]
+            ])
+        else:
+            M = np.float32([[1, 0, dx], [0, 1, dy]])
         shifted_rgb = cv2.warpAffine(premul_rgb, M, (w, h),
                                      flags=cv2.INTER_LINEAR,
                                      borderMode=cv2.BORDER_CONSTANT,

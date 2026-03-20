@@ -28,6 +28,10 @@ env/
 depth-mapper/depth_maps/
 depth-mapper/layers/
 
+# User uploads and selfies
+depth-mapper/images/selfie*.jpg
+depth-mapper/images/screenshot*.jpg
+
 # Claude
 CLAUDE.md
 

@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parallax Viewer — Head Tracking</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --space-xs: 4px;
+    --space-sm: 8px;
+    --space-md: 16px;
+    --space-lg: 24px;
+    --space-xl: 48px;
+    --surface: #f7f6f3;
+    --surface-card: #ffffff;
+    --text-primary: #37352f;
+    --text-muted: #9b9a97;
+    --border-light: rgba(55,53,47,0.09);
+    --border-medium: rgba(55,53,47,0.16);
+    --accent: #0f7b6c;
+    --accent-bg: rgba(15,123,108,0.06);
+    --blue: #2eaadc;
+    --red: #e16259;
+    --radius: 6px;
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.04);
+    --shadow-md: 0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.06);
+  }
+
+  body {
+    background: var(--surface);
+    color: var(--text-primary);
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── Canvas zone: side-by-side panels ── */
+  #canvas-zone {
+    flex: 1;
+    display: flex;
+    align-items: stretch;
+    gap: var(--space-md);
+    padding: var(--space-md) var(--space-lg);
+    min-height: 0;
+    position: relative;
+  }
+
+  .panel {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-sm);
+  }
+
+  .panel-media {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+  }
+
+  .panel-label {
+    font-size: .65rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    user-select: none;
+    flex-shrink: 0;
+    padding-bottom: var(--space-xs);
+  }
+
+  #raw-image, #frame-canvas {
+    border-radius: var(--radius);
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    box-shadow: var(--shadow-md);
+  }
+  #raw-image {
+    background: #f0efeb;
+    border: 1px solid var(--border-light);
+  }
+  #frame-canvas {
+    background: #0b0e17;
+    border: 1px solid rgba(0,0,0,0.12);
+  }
+
+  /* Upload overlay */
+  #upload-overlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(247,246,243,0.92);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    z-index: 5;
+  }
+  #upload-overlay.visible { display: flex; }
+  #upload-progress {
+    font-size: .875rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    text-align: center;
+    line-height: 1.6;
+  }
+
+  /* ── Camera preview ── */
+  #cam-wrap {
+    position: fixed;
+    bottom: 60px;
+    right: var(--space-md);
+    width: 120px;
+    aspect-ratio: 4 / 3;
+    border-radius: var(--radius);
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.1);
+    z-index: 10;
+    background: #000;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+  }
+  #cam-wrap video {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    opacity: 0.4;
+  }
+  #cam-wrap canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    transform: scaleX(-1);
+  }
+
+  /* ── HUD bar ── */
+  #hud {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-lg);
+    border-top: 1px solid var(--border-light);
+    background: var(--surface-card);
+  }
+
+  /* HUD group: tighter internal spacing, more room between groups */
+  .hud-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .hud-group + .hud-group {
+    margin-left: var(--space-sm);
+  }
+
+  .hud-sep {
+    width: 1px;
+    height: 16px;
+    background: var(--border-light);
+    flex-shrink: 0;
+    margin: 0 var(--space-xs);
+  }
+
+  .hud-label {
+    font-size: .6875rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    user-select: none;
+  }
+  .hud-value {
+    font-size: .75rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  /* Controls */
+  #case-select {
+    font-size: .75rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    background: transparent;
+    border: 1px solid var(--border-medium);
+    border-radius: 4px;
+    padding: 4px 10px;
+    cursor: pointer;
+    outline: none;
+    transition: background .15s;
+  }
+  #case-select:hover { background: rgba(55,53,47,0.04); }
+
+  .toggle-btn {
+    font-size: .6875rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid var(--border-medium);
+    border-radius: 4px;
+    padding: 4px 10px;
+    cursor: pointer;
+    line-height: 1;
+    transition: all .15s;
+  }
+  .toggle-btn:hover { background: rgba(55,53,47,0.04); }
+  .toggle-btn.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-bg);
+  }
+
+  .slider-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  #intensitySlider {
+    width: 72px;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 2px;
+    background: var(--border-light);
+    border-radius: 1px;
+    outline: none;
+  }
+  #intensitySlider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 10px;
+    height: 10px;
+    background: var(--text-primary);
+    border-radius: 50%;
+    cursor: pointer;
+  }
+
+  .hud-spacer { flex: 1; }
+
+  /* Status readouts */
+  .hud-stat {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .hud-stat .hud-value {
+    font-size: .6875rem;
+    font-weight: 400;
+    color: var(--text-muted);
+  }
+
+  #conn-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+    transition: background .2s;
+  }
+  #conn-dot.ok { background: var(--accent); }
+  #conn-dot.err { background: var(--red); }
+
+  @media (max-width: 680px) {
+    #canvas-zone { flex-direction: column; gap: var(--space-sm); padding: var(--space-sm); }
+    .panel { flex: none; height: auto; }
+    .panel-media { height: 40vh; }
+    #hud { flex-wrap: wrap; padding: var(--space-sm) var(--space-md); }
+    .hud-spacer { display: none; }
+    .slider-group { order: 10; width: 100%; margin-top: var(--space-xs); }
+  }
+</style>
+</head>
+<body>
+
+<!-- Side-by-side viewer -->
+<div id="canvas-zone">
+  <div class="panel" id="raw-panel">
+    <div class="panel-media"><img id="raw-image" alt="Original" /></div>
+    <span class="panel-label">Original</span>
+  </div>
+  <div class="panel" id="parallax-panel">
+    <div class="panel-media"><canvas id="frame-canvas" width="900" height="600"></canvas></div>
+    <span class="panel-label">Parallax</span>
+  </div>
+  <div id="upload-overlay">
+    <div id="upload-progress">Uploading...</div>
+  </div>
+</div>
+
+<!-- Camera preview -->
+<div id="cam-wrap">
+  <video id="video" playsinline muted></video>
+  <canvas id="cam-canvas"></canvas>
+</div>
+
+<!-- HUD bar -->
+<div id="hud">
+  <!-- Image selection -->
+  <div class="hud-group">
+    <select id="case-select"></select>
+    <label class="toggle-btn" style="position:relative; overflow:hidden;">
+      Upload
+      <input type="file" accept="image/*" id="upload-input"
+             style="position:absolute; opacity:0; inset:0; cursor:pointer;">
+    </label>
+    <button class="toggle-btn" id="selfie-btn">Selfie</button>
+  </div>
+
+  <div class="hud-sep"></div>
+
+  <!-- Rendering controls -->
+  <div class="hud-group">
+    <span class="hud-label">Gap Fill</span>
+    <button class="toggle-btn" id="fill-btn">OFF</button>
+  </div>
+
+  <div class="hud-group">
+    <div class="slider-group">
+      <span class="hud-label">Intensity</span>
+      <input type="range" id="intensitySlider" min="0" max="200" value="100">
+      <span class="hud-value" id="intensityVal">100%</span>
+    </div>
+  </div>
+
+  <div class="hud-spacer"></div>
+
+  <!-- Status readouts -->
+  <div class="hud-group">
+    <div class="hud-stat">
+      <span class="hud-label">FPS</span>
+      <span class="hud-value" id="fpsVal">—</span>
+    </div>
+    <div class="hud-stat">
+      <span class="hud-label">Pos</span>
+      <span class="hud-value" id="posVal">—</span>
+    </div>
+    <div class="hud-stat">
+      <span class="hud-label">Input</span>
+      <span class="hud-value" id="srcVal">—</span>
+    </div>
+  </div>
+
+  <div class="hud-sep"></div>
+
+  <div class="hud-stat">
+    <div id="conn-dot"></div>
+    <span class="hud-value" id="connVal">Connecting…</span>
+  </div>
+</div>
+
+<!-- MediaPipe CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+
+<script>
+// ── Elements ──
+const frameCanvas  = document.getElementById('frame-canvas');
+const frameCtx     = frameCanvas.getContext('2d');
+const rawImage     = document.getElementById('raw-image');
+const uploadInput  = document.getElementById('upload-input');
+const selfieBtn    = document.getElementById('selfie-btn');
+const uploadOverlay= document.getElementById('upload-overlay');
+const uploadProgress=document.getElementById('upload-progress');
+const videoEl      = document.getElementById('video');
+const camCanvas    = document.getElementById('cam-canvas');
+const camCtx       = camCanvas.getContext('2d');
+const caseSelect   = document.getElementById('case-select');
+const fillBtn      = document.getElementById('fill-btn');
+const intensityEl  = document.getElementById('intensitySlider');
+const intensityVal = document.getElementById('intensityVal');
+const fpsEl        = document.getElementById('fpsVal');
+const posEl        = document.getElementById('posVal');
+const srcEl        = document.getElementById('srcVal');
+const connEl       = document.getElementById('connVal');
+const connDot      = document.getElementById('conn-dot');
+
+// ── State ──
+let ws = null;
+let headX = 0, headY = 0, headZ = 0;
+let smoothX = 0, smoothY = 0, smoothZ = 0;
+let baselineFaceH = null;
+let baselineFrames = 0;
+let intensity = 1.0;
+let inputSource = 'none';
+let fillGaps = false;
+let sending = false;
+let frameCount = 0, lastFpsTime = performance.now();
+let initialLoadDone = false;
+
+// ── Intensity slider ──
+intensityEl.addEventListener('input', () => {
+  intensity = intensityEl.value / 100;
+  intensityVal.textContent = intensityEl.value + '%';
+});
+
+// ── FPS counter ──
+function tickFps() {
+  frameCount++;
+  const now = performance.now();
+  if (now - lastFpsTime >= 1000) {
+    fpsEl.textContent = frameCount;
+    frameCount = 0;
+    lastFpsTime = now;
+  }
+}
+
+// ── WebSocket ──
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    connEl.textContent = 'Connected';
+    connDot.className = 'ok';
+    sendResize();
+    loadCases();
+    requestAnimationFrame(sendLoop);
+  };
+
+  ws.onmessage = (evt) => {
+    if (evt.data instanceof ArrayBuffer) {
+      const blob = new Blob([evt.data], { type: 'image/jpeg' });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        frameCanvas.width = img.width;
+        frameCanvas.height = img.height;
+        frameCtx.drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
+        tickFps();
+        sending = false;
+      };
+      img.src = url;
+    } else {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (msg.type === 'fill_status') {
+          fillGaps = msg.fill;
+          fillBtn.textContent = fillGaps ? 'ON' : 'OFF';
+          fillBtn.classList.toggle('active', fillGaps);
+        } else if (msg.type === 'switched') {
+          connEl.textContent = `${msg.stem} (${msg.w}×${msg.h}, ${msg.num_layers}L)`;
+          connDot.className = 'ok';
+          rawImage.src = `/api/raw/${msg.stem}`;
+          smoothX = headX;  // snap smoothing to current position
+          smoothY = headY;
+          smoothZ = headZ;
+          sending = false;
+        } else if (msg.type === 'resized') {
+          sending = false;
+        } else if (msg.type === 'error') {
+          connEl.textContent = msg.msg;
+          connDot.className = 'err';
+        }
+      } catch (e) {}
+      sending = false;
+    }
+  };
+
+  ws.onclose = () => {
+    connEl.textContent = 'Reconnecting…';
+    connDot.className = 'err';
+    setTimeout(connectWS, 2000);
+  };
+
+  ws.onerror = () => {
+    connDot.className = 'err';
+  };
+}
+
+// ── Tell server to fit frames within available viewport ──
+function sendResize() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  // Each panel is ~half viewport. Account for padding (24*2), gap (16), borders.
+  const maxW = Math.round((window.innerWidth - 72) / 2);
+  const maxH = Math.round(window.innerHeight - 76);
+  ws.send(JSON.stringify({ type: 'resize', max_w: maxW, max_h: maxH }));
+}
+
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(sendResize, 300);
+});
+
+// ── Send head position at ~30fps (throttled by response) ──
+function sendLoop() {
+  if (ws && ws.readyState === WebSocket.OPEN && !sending) {
+    smoothX += (headX - smoothX) * 0.3;
+    smoothY += (headY - smoothY) * 0.3;
+    smoothZ += (headZ - smoothZ) * 0.3;
+
+    sending = true;
+    ws.send(JSON.stringify({
+      type: 'head',
+      x: smoothX,
+      y: smoothY,
+      z: smoothZ,
+      intensity: intensity,
+    }));
+    posEl.textContent = `${smoothX.toFixed(2)}, ${smoothY.toFixed(2)}, ${smoothZ.toFixed(2)}`;
+  }
+  requestAnimationFrame(sendLoop);
+}
+
+// ── Load available cases ──
+async function loadCases() {
+  try {
+    const resp = await fetch('/api/cases');
+    const cases = await resp.json();
+    const prev = caseSelect.value;
+    caseSelect.innerHTML = '';
+    cases.forEach(stem => {
+      const opt = document.createElement('option');
+      opt.value = stem;
+      opt.textContent = stem;
+      caseSelect.appendChild(opt);
+    });
+    // Restore previous selection
+    if (prev && cases.includes(prev)) {
+      caseSelect.value = prev;
+    }
+    // Set raw image only on first load
+    if (!initialLoadDone && cases.length > 0) {
+      rawImage.src = `/api/raw/${caseSelect.value}`;
+      initialLoadDone = true;
+    }
+  } catch (e) {
+    console.error('Failed to load cases', e);
+  }
+}
+
+// ── Image switcher ──
+caseSelect.addEventListener('change', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  connEl.textContent = 'Loading…';
+  connDot.className = '';
+  ws.send(JSON.stringify({ type: 'switch', stem: caseSelect.value }));
+});
+
+// ── Gap-fill toggle ──
+fillBtn.addEventListener('click', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'toggle_fill' }));
+});
+
+// ── Keyboard shortcut: D toggles gap-fill ──
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'd' || e.key === 'D') {
+    fillBtn.click();
+  }
+});
+
+// ── Mouse fallback ──
+frameCanvas.addEventListener('mousemove', (e) => {
+  if (inputSource === 'head') return;
+  inputSource = 'mouse';
+  srcEl.textContent = 'Mouse';
+  const rect = frameCanvas.getBoundingClientRect();
+  headX = ((e.clientX - rect.left) / rect.width - 0.5) * 2;
+  headY = ((e.clientY - rect.top) / rect.height - 0.5) * 2;
+});
+
+frameCanvas.addEventListener('mouseleave', () => {
+  if (inputSource === 'mouse') {
+    headX = 0;
+    headY = 0;
+  }
+});
+
+// Scroll wheel as Z control in mouse mode
+frameCanvas.addEventListener('wheel', (e) => {
+  if (inputSource === 'head') return;
+  e.preventDefault();
+  headZ = Math.max(-0.6, Math.min(0.6, headZ - e.deltaY * 0.003));
+}, { passive: false });
+
+// ── Head Tracking (MediaPipe Face Mesh) ──
+const NOSE_TIP = 1;
+const FOREHEAD = 10;
+const CHIN = 152;
+const LEFT_EYE_OUTER = 263;
+const RIGHT_EYE_OUTER = 33;
+
+const FACE_OVAL = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109,10];
+
+function computePosition(landmarks) {
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  for (const p of landmarks) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const faceH = maxY - minY;
+  return { cx, cy, faceH };
+}
+
+function drawCamOverlay(landmarks) {
+  const w = camCanvas.width, h = camCanvas.height;
+  camCtx.clearRect(0, 0, w, h);
+
+  // Head center dot — large and bright
+  const pos = computePosition(landmarks);
+  const cx = pos.cx * w, cy = pos.cy * h;
+
+  camCtx.beginPath();
+  camCtx.arc(cx, cy, 18, 0, Math.PI * 2);
+  camCtx.fillStyle = 'rgba(46,170,220,0.25)';
+  camCtx.fill();
+
+  camCtx.beginPath();
+  camCtx.arc(cx, cy, 10, 0, Math.PI * 2);
+  camCtx.fillStyle = '#2eaadc';
+  camCtx.fill();
+}
+
+let faceDetected = false;
+let noFaceFrames = 0;
+
+const faceMesh = new FaceMesh({
+  locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+});
+
+faceMesh.setOptions({
+  maxNumFaces: 1,
+  refineLandmarks: true,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5,
+});
+
+faceMesh.onResults((results) => {
+  if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+    const landmarks = results.multiFaceLandmarks[0];
+    const pos = computePosition(landmarks);
+
+    headX = (1 - pos.cx - 0.5) * 2;
+    headY = (pos.cy - 0.5) * 2;
+
+    // Z-axis: use face bounding box height as distance proxy
+    if (baselineFaceH === null || baselineFrames < 30) {
+      // Calibrate baseline over first 30 frames
+      if (baselineFaceH === null) baselineFaceH = pos.faceH;
+      else baselineFaceH += (pos.faceH - baselineFaceH) * 0.1;
+      baselineFrames++;
+    } else {
+      headZ = Math.max(-0.6, Math.min(0.6, (pos.faceH - baselineFaceH) / baselineFaceH));
+    }
+
+    inputSource = 'head';
+    srcEl.textContent = 'Head';
+    faceDetected = true;
+    noFaceFrames = 0;
+
+    drawCamOverlay(landmarks);
+  } else {
+    noFaceFrames++;
+    if (noFaceFrames > 30) {
+      faceDetected = false;
+      inputSource = 'mouse';
+      srcEl.textContent = 'Mouse (no face)';
+      camCtx.clearRect(0, 0, camCanvas.width, camCanvas.height);
+    }
+  }
+});
+
+// ── Camera start ──
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' }
+    });
+    videoEl.srcObject = stream;
+    await videoEl.play();
+
+    camCanvas.width = videoEl.videoWidth;
+    camCanvas.height = videoEl.videoHeight;
+
+    connEl.textContent = 'DVS 2026 by stefan and ken';
+
+    const camera = new Camera(videoEl, {
+      onFrame: async () => {
+        await faceMesh.send({ image: videoEl });
+      },
+      width: 640,
+      height: 480,
+    });
+    camera.start();
+  } catch (err) {
+    console.warn('Camera not available:', err.message);
+    connEl.textContent = 'No camera — use mouse';
+    inputSource = 'mouse';
+    srcEl.textContent = 'Mouse';
+    document.getElementById('cam-wrap').style.display = 'none';
+  }
+}
+
+// ── Shared upload + poll logic ──
+async function uploadAndPoll(formData) {
+  uploadOverlay.classList.add('visible');
+  uploadProgress.textContent = 'Uploading...';
+
+  try {
+    const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+
+    const jobId = data.job_id;
+    const poll = setInterval(async () => {
+      try {
+        const sr = await fetch(`/api/upload/${jobId}`);
+        const job = await sr.json();
+        uploadProgress.textContent = job.progress || 'Processing...';
+
+        if (job.status === 'done') {
+          clearInterval(poll);
+          uploadOverlay.classList.remove('visible');
+          await loadCases();
+          caseSelect.value = job.stem;
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'switch', stem: job.stem }));
+          }
+        } else if (job.status === 'error') {
+          clearInterval(poll);
+          uploadProgress.textContent = `Error: ${job.error}`;
+          setTimeout(() => uploadOverlay.classList.remove('visible'), 3000);
+        }
+      } catch (e) {
+        clearInterval(poll);
+        uploadProgress.textContent = 'Polling failed';
+        setTimeout(() => uploadOverlay.classList.remove('visible'), 3000);
+      }
+    }, 2000);
+  } catch (e) {
+    uploadProgress.textContent = `Upload failed: ${e.message}`;
+    setTimeout(() => uploadOverlay.classList.remove('visible'), 3000);
+  }
+}
+
+// ── Upload handler ──
+uploadInput.addEventListener('change', async () => {
+  const file = uploadInput.files[0];
+  if (!file) return;
+  uploadInput.value = '';
+  const formData = new FormData();
+  formData.append('file', file);
+  uploadAndPoll(formData);
+});
+
+// ── Selfie handler ──
+selfieBtn.addEventListener('click', () => {
+  if (!videoEl.srcObject) {
+    alert('Camera not available');
+    return;
+  }
+  // Capture frame from webcam
+  const c = document.createElement('canvas');
+  c.width = videoEl.videoWidth;
+  c.height = videoEl.videoHeight;
+  c.getContext('2d').drawImage(videoEl, 0, 0);
+  c.toBlob(blob => {
+    const formData = new FormData();
+    const ts = new Date().toISOString().replace(/[-:T]/g,'').slice(0,14);
+    formData.append('file', blob, `selfie_${ts}.jpg`);
+    uploadAndPoll(formData);
+  }, 'image/jpeg', 0.92);
+});
+
+// ── Init ──
+connectWS();
+startCamera();
+</script>
+</body>
+</html>
