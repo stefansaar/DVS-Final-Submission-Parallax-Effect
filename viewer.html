@@ -321,7 +321,7 @@
   <!-- Rendering controls -->
   <div class="hud-group">
     <span class="hud-label">Gap Fill</span>
-    <button class="toggle-btn" id="fill-btn">OFF</button>
+    <button class="toggle-btn active" id="fill-btn">ON</button>
   </div>
 
   <div class="hud-group">
@@ -392,7 +392,7 @@ let baselineFaceH = null;
 let baselineFrames = 0;
 let intensity = 2.0;
 let inputSource = 'none';
-let fillGaps = false;
+let fillGaps = true;
 let sending = false;
 let frameCount = 0, lastFpsTime = performance.now();
 let initialLoadDone = false;

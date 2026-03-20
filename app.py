@@ -53,7 +53,7 @@ state = {
     "w": 0,
     "max_w": 640,              # max width, updated by client
     "max_h": 480,              # max height, updated by client
-    "fill_gaps": False,
+    "fill_gaps": True,
     "cases": [],              # list of stem names
     "current_stem": None,
     "raw_layers_cache": {},   # stem → list of RGBA uint8 arrays (full res)

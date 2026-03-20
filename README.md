@@ -6,7 +6,6 @@ Turn any 2D image into an interactive parallax scene driven by head tracking (we
 
 ## Setup
 
-
 ```bash
 pip install flask flask-sock numpy opencv-python-headless scikit-learn Pillow gradio_client
 ```
@@ -54,24 +53,25 @@ The three files form a loop that runs every frame:
 
 **Stage 10 — Compositing** (`compositing.py`). Each layer is translated and scaled using a 2×3 transformation matrix, then blended back-to-front with alpha compositing. During blending, a coverage buffer tracks how much each pixel has been covered. After all layers are composited, any pixel with coverage below 0.99 is a gap. These gaps are filled using the Telea inpainting algorithm, which traverses outward from gap edges in a BFS-like order, computing each missing pixel's colour as a distance-weighted average of its known neighbours. The result is a single composited image.
 
-   **Transformation matrix.** Each layer is shifted and scaled by a 2×3 matrix:
+**Transformation matrix.** Each layer is shifted and scaled by a 2×3 matrix:
 
-   ```
-   M = [[scale,  0,     dx],
-        [0,      scale, dy]]
-   ```
+```
+M = [[scale,  0,     dx],
+     [0,      scale, dy]]
+```
 
-   Column 1 and 2 control X/Y scaling, column 3 controls X/Y translation. This tells each pixel: move by (dx, dy) and scale by the given factor, all in one operation.
+Column 1 and 2 control X/Y scaling, column 3 controls X/Y translation. This tells each pixel: move by (dx, dy) and scale by the given factor, all in one operation.
 
-   **Alpha compositing.** Each layer only covers part of the image — the rest is transparent (alpha = 0). Alpha compositing uses the alpha channel to decide which pixels to draw and which to skip, so transparent regions let the layers behind show through instead of appearing as black. Layers are blended one at a time from the farthest background to the nearest foreground, producing the final composited frame.
+**Alpha compositing.** Each layer only covers part of the image — the rest is transparent (alpha = 0). Alpha compositing uses the alpha channel to decide which pixels to draw and which to skip, so transparent regions let the layers behind show through instead of appearing as black. Layers are blended one at a time from the farthest background to the nearest foreground, producing the final composited frame.
 
-   **Gap inpainting.** Gaps are filled by OpenCV's `cv2.inpaint(image, mask, radius, cv2.INPAINT_TELEA)`:
-   - `image` — the composited frame with gaps
-   - `mask` — binary mask marking which pixels are gaps (coverage < 0.99)
-   - `radius` — how far (in pixels) the algorithm looks for known pixels to fill from (set to 5)
-   - `INPAINT_TELEA` — selects the Telea algorithm
+**Gap inpainting.** Gaps are filled by OpenCV's `cv2.inpaint(image, mask, radius, cv2.INPAINT_TELEA)`:
 
-   The algorithm works like BFS: it starts from the edges of each gap where known pixels exist, then fills inward one pixel at a time. Each missing pixel's colour is computed as a weighted average of its known neighbours, with closer neighbours weighted more heavily. This produces a smooth fill that extends the surrounding colours into the gap.
+- `image` — the composited frame with gaps
+- `mask` — binary mask marking which pixels are gaps (coverage < 0.99)
+- `radius` — how far (in pixels) the algorithm looks for known pixels to fill from (set to 5)
+- `INPAINT_TELEA` — selects the Telea algorithm
+
+The algorithm works like BFS: it starts from the edges of each gap where known pixels exist, then fills inward one pixel at a time. Each missing pixel's colour is computed as a weighted average of its known neighbours, with closer neighbours weighted more heavily. This produces a smooth fill that extends the surrounding colours into the gap.
 **Stage 11 — Streaming** (`app.py`). The composited image is encoded as JPEG and sent back over WebSocket. If the head hasn't moved enough since the last frame, the cached JPEG is reused to save CPU.
 
 ---
@@ -82,12 +82,12 @@ The three files form a loop that runs every frame:
 
 **Mountains** — 4 layers auto-detected
 
-| Original | Depth map |
-| -------- | --------- |
+| Original                                   | Depth map                                           |
+| ------------------------------------------ | --------------------------------------------------- |
 | ![Original](0_source_images/mountains.jpg) | ![Depth map](1_depth_maps/depth_mountains_run1.png) |
 
-| Layer 0 (background)                                   | Layer 1                                                | Layer 2                                                | Layer 3 (foreground)                                   |
-| ------------------------------------------------------ | ------------------------------------------------------ | ------------------------------------------------------ | ------------------------------------------------------ |
+| Layer 0 (background)                        | Layer 1                                     | Layer 2                                     | Layer 3 (foreground)                        |
+| ------------------------------------------- | ------------------------------------------- | ------------------------------------------- | ------------------------------------------- |
 | ![Layer 0](2_layers/mountains/layer_00.png) | ![Layer 1](2_layers/mountains/layer_01.png) | ![Layer 2](2_layers/mountains/layer_02.png) | ![Layer 3](2_layers/mountains/layer_03.png) |
 
 ### Parallax in action
@@ -102,7 +102,7 @@ The three files form a loop that runs every frame:
 - **Mouse fallback** — full parallax control via mouse hover when no camera is available; scroll wheel controls zoom.
 - **Automatic depth segmentation** — the pipeline estimates how many layers the scene naturally contains from its depth histogram, then uses spatial k-means to cut clean, contiguous regions rather than thin noisy slices.
 - **Morphological mask refinement** — closing, erosion, and dilation passes clean mask edges and pre-fill the gaps that parallax shifting would otherwise expose.
-- **Gap infilling** — a toggle in the viewer reconstructs occluded background regions so moving layers don't reveal transparent holes.
+- **Gap infilling** — enabled by default, reconstructs occluded background regions so moving layers don't reveal transparent holes. Can be toggled on/off in the viewer.
 - **Custom image upload** — any image can be dropped in via the browser UI; depth estimation runs automatically via the HuggingFace API and layers are generated on the fly.
 
 ---
@@ -123,3 +123,11 @@ The three files form a loop that runs every frame:
 - **Very similar depth layers** — when adjacent layers differ by only a few depth values, k-means placement is sensitive to initialisation and can produce uneven splits.
 - **Limited depth map resolution** — Depth Anything V2 outputs at a fixed resolution (typically 518×518), so high-resolution input images are downscaled before depth estimation. The depth map is then upscaled back to the original size, which can introduce blurriness and loss of fine edge detail in the segmented layers.
 - **Real-time compositing performance** — every frame is composited server-side in Python (NumPy + OpenCV), which is significantly slower than GPU-based rendering. With more layers or higher resolution images, frame rate drops noticeably. The WebSocket round-trip (browser → server → composite → JPEG encode → browser) adds further latency compared to a purely client-side approach.
+
+---
+
+## Personal Reflection & Contribution
+
+For personal reflections and a detailed breakdown of individual contributions, see our shared Notion page:
+
+🔗 [Personal Reflection & Contribution (Notion)](https://www.notion.so/Personal-Reflection-329e1efacd848067a73ae87ad82ebfbb?source=copy_link)
