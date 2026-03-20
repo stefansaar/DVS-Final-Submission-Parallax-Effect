@@ -303,8 +303,10 @@ const fpsEl    = document.getElementById('fpsVal');
 /* ── Parallax ────────────────────────────────────────── */
 const sceneEl = document.getElementById('scene');
 const layers  = document.querySelectorAll('.layer');
-let smoothX = 0, smoothY = 0;
+let smoothX = 0, smoothY = 0, smoothZ = 0;
 let lastHeadX = 50, lastHeadY = 50;
+let lastHeadSize = 0;   // face area %, 0 = not yet calibrated
+let baseHeadSize = 0;   // calibrated "neutral" face size
 let intensity = 1.0;
 
 const intensitySlider = document.getElementById('intensitySlider');
@@ -317,20 +319,23 @@ intensitySlider.addEventListener('input', () => {
 function animateParallax() {
   const targetX = (lastHeadX - 50) / 50;
   const targetY = (lastHeadY - 50) / 50;
+  // Z: how much closer/farther than calibrated position (positive = closer = zoom in)
+  const targetZ = baseHeadSize > 0 ? (lastHeadSize - baseHeadSize) / baseHeadSize : 0;
 
   smoothX += (targetX - smoothX) * 0.18;
   smoothY += (targetY - smoothY) * 0.18;
+  smoothZ += (targetZ - smoothZ) * 0.12;  // slower smoothing for zoom
 
-  // Tilt the scene frame
-  const rotY = smoothX * 3 * intensity;   // max ~3deg
-  const rotX = -smoothY * 2 * intensity;  // max ~2deg
-  sceneEl.style.transform = `perspective(800px) rotateY(${rotY}deg) rotateX(${rotX}deg)`;
+  sceneEl.style.transform = '';
 
   layers.forEach(layer => {
     const depth = parseFloat(layer.dataset.depth) * intensity;
     const tx = -smoothX * depth;
-    const ty = -smoothY * depth * 0.6;
-    layer.style.transform = `translate3d(${tx}px, ${ty}px, 0)`;
+    const ty = -smoothY * depth * 0.3;
+    // Closer layers scale more when head moves forward/back
+    const depthNorm = depth / 80;  // normalize depth to 0–1
+    const scale = 1 + smoothZ * 0.3 * (1 + depthNorm) * intensity;
+    layer.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(${scale})`;
   });
 
   requestAnimationFrame(animateParallax);
@@ -480,6 +485,8 @@ faceMesh.onResults((results) => {
     // Drive parallax
     lastHeadX = displayX;
     lastHeadY = displayY;
+    lastHeadSize = sizePercent;
+    if (baseHeadSize === 0) baseHeadSize = sizePercent;  // calibrate on first detection
 
     posXVal.textContent = displayX.toFixed(1) + '%';
     posYVal.textContent = displayY.toFixed(1) + '%';
