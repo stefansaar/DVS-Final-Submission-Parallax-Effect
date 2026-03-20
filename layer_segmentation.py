@@ -14,7 +14,7 @@ Layer ordering in returned list:
 Usage (CLI):
     python layer_segmentation.py <image_path> <depth_map_path> [num_layers]
 
-    Saves each RGBA layer as a PNG in ./layers/<stem>/layer_00.png ... layer_N.png
+    Saves each RGBA layer as a PNG in ./2_layers/<stem>/layer_00.png ... layer_N.png
 Usage (library):
     from layer_segmentation import segment_layers
 

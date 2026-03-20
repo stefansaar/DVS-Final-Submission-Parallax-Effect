@@ -1,23 +1,12 @@
 """
 compositing.py
 
-Enhanced parallax compositor with mask dilation, inpaint-based pixel fill,
-and feathered alpha edges.
-
-Implements:
-    T1.3 — Mask dilation: expand each layer mask outward so overlapping buffers
-            cover the gaps that appear when layers shift apart.
-    T1.4 — Pixel fill: fill the newly dilated region with smooth colour via
-            cv2.inpaint (Telea algorithm).
-    T1.6 — Premultiplied-alpha compositor with feathered edges: fewer per-pixel
-            multiplies than straight-alpha blending, and soft alpha transitions
-            eliminate hard seams between layers.
-
-Drop-in replacement for the precompute_layers() and composite() functions
-in test_parallax.py.
+Premultiplied-alpha parallax compositor with optional real-time gap detection.
+Provides precompute_layers() and composite() used by app.py.
 
 Usage:
     python compositing.py <image_path> <depth_map_path> [num_layers]
+    python compositing.py --all [num_layers]
 """
 
 import os
@@ -32,119 +21,12 @@ DISPLAY_MAX_WIDTH = 900
 
 
 # ---------------------------------------------------------------------------
-# T1.3 — Mask dilation
-# ---------------------------------------------------------------------------
-
-def dilate_mask(alpha: np.ndarray, dilation_px: int) -> np.ndarray:
-    """
-    Expand a binary alpha mask outward by *dilation_px* pixels.
-
-    Args:
-        alpha:        (H, W) uint8 mask, values in {0, 255}.
-        dilation_px:  Radius of the dilation kernel in pixels.
-
-    Returns:
-        Dilated alpha mask, same shape and dtype.
-    """
-    k = 2 * dilation_px + 1
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-    return cv2.dilate(alpha, kernel, iterations=1)
-
-
-# ---------------------------------------------------------------------------
-# T1.4 — Inpaint-based pixel fill
-# ---------------------------------------------------------------------------
-
-def fill_inpaint(rgb: np.ndarray, original_alpha: np.ndarray,
-                 radius: int = 5) -> np.ndarray:
-    """
-    Fill ALL transparent pixels with smooth colour using cv2.inpaint (Telea).
-
-    The mask covers every pixel where original_alpha == 0, so the algorithm
-    only draws from truly opaque source pixels — no black contamination from
-    the empty regions outside the dilated zone.
-
-    Pixels far from any opaque boundary get interpolated colours too, but
-    they will have alpha == 0 in the final layer so they are invisible.
-
-    Args:
-        rgb:            (H, W, 3) uint8 colour data.
-        original_alpha: (H, W) uint8 mask (opaque pixels are the source).
-        radius:         Inpaint neighbourhood radius (pixels).
-
-    Returns:
-        (H, W, 3) uint8 with all transparent regions filled.
-    """
-    inpaint_mask = (original_alpha == 0).astype(np.uint8) * 255
-    if not inpaint_mask.any():
-        return rgb
-    return cv2.inpaint(rgb, inpaint_mask, radius, cv2.INPAINT_TELEA)
-
-
-# ---------------------------------------------------------------------------
-# Alpha feathering
-# ---------------------------------------------------------------------------
-
-def feather_alpha(dilated_alpha: np.ndarray, original_alpha: np.ndarray,
-                  sigma: float = 4.0) -> np.ndarray:
-    """
-    Soften the hard edges of a dilated mask with a Gaussian blur.
-
-    The original opaque region stays at 255; only the dilated fringe gets a
-    smooth falloff, so layer transitions look natural instead of aliased.
-
-    Args:
-        dilated_alpha:  (H, W) uint8 — the expanded mask.
-        original_alpha: (H, W) uint8 — the mask before dilation.
-        sigma:          Gaussian sigma controlling the falloff width.
-
-    Returns:
-        (H, W) uint8 feathered alpha.
-    """
-    blurred = cv2.GaussianBlur(dilated_alpha.astype(np.float32), (0, 0), sigmaX=sigma)
-    # Keep original opaque pixels at full 255
-    feathered = np.maximum(blurred, original_alpha.astype(np.float32))
-    return feathered.clip(0, 255).astype(np.uint8)
-
-
-# ---------------------------------------------------------------------------
-# T1.3 + T1.4 combined
-# ---------------------------------------------------------------------------
-
-def dilate_and_fill(layers: list, dilation_px: int = 20) -> list:
-    """
-    Dilate each layer's mask, inpaint the new region, and feather the edges.
-
-    Args:
-        layers:       List of RGBA uint8 arrays (H, W, 4) from segment_layers().
-        dilation_px:  How many pixels to expand each mask outward.
-
-    Returns:
-        List of RGBA uint8 arrays, same format — can be passed directly to
-        precompute_layers().
-    """
-    out = []
-    for layer in layers:
-        rgb = layer[:, :, :3]
-        alpha = layer[:, :, 3]
-
-        dilated_alpha = dilate_mask(alpha, dilation_px)
-        filled_rgb = fill_inpaint(rgb, alpha, radius=5)
-        soft_alpha = feather_alpha(dilated_alpha, alpha, sigma=dilation_px / 5)
-
-        out.append(np.dstack([filled_rgb, soft_alpha]))
-    return out
-
-
-# ---------------------------------------------------------------------------
-# T1.6 — Premultiplied-alpha compositor
+# Premultiplied-alpha compositor
 # ---------------------------------------------------------------------------
 
 def precompute_layers(layers: list) -> list:
     """
     Convert RGBA uint8 layers to premultiplied-alpha float32.
-
-    Drop-in replacement for test_parallax.precompute_layers().
 
     Returns:
         List of (premul_rgb (H,W,3) float32, alpha (H,W,1) float32) tuples.
@@ -161,8 +43,6 @@ def composite(float_layers: list, shifts: list, h: int, w: int,
               fill_gaps: bool = False) -> np.ndarray:
     """
     Shift each layer and alpha-blend back-to-front.  Returns BGR uint8.
-
-    Drop-in replacement for test_parallax.composite().
 
     When fill_gaps=True, tracks total alpha coverage and uses cv2.inpaint
     to fill only the gap pixels (where no layer covers).
@@ -268,7 +148,7 @@ def run_viewer(image_bgr, depth_map, num_layers, title="Parallax"):
     cv2.destroyAllWindows()
 
 
-def find_all_cases(images_dir="./images", depth_dir="./depth_maps"):
+def find_all_cases(images_dir="./0_source_images", depth_dir="./1_depth_maps"):
     """Find all image+depth pairs available for demo."""
     import glob as g
     cases = []

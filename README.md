@@ -11,8 +11,7 @@ pip install flask flask-sock numpy opencv-python-headless scikit-learn Pillow gr
 ## Run
 
 ```bash
-cd depth-mapper
-python web_viewer.py
+python app.py
 ```
 
 Open http://localhost:5002 in your browser (Chrome recommended for webcam access).
@@ -42,9 +41,35 @@ Open http://localhost:5002 in your browser (Chrome recommended for webcam access
 
 **Stage 7 — RGBA layer extraction.** Each mask is combined with the original image to produce an RGBA array (opaque where active, transparent elsewhere), giving a depth-ordered layer stack ready for the parallax renderer.
 
-### Parallax renderer (`compositing.py` / `web_viewer.py`)
+### Real-time rendering (`viewer.html` → `app.py` → `compositing.py`)
 
-_— to be completed by teammate_
+The three files form a loop that runs every frame:
+
+**Stage 8 — Head tracking** (`viewer.html`). MediaPipe Face Mesh detects 468 facial landmarks per frame from the webcam. The face centre is normalised to (x, y, z) where Z is derived from face size as a distance proxy. Positions are smoothed with exponential moving average to suppress jitter and sent to the server over WebSocket. Mouse/scroll serves as fallback input.
+
+**Stage 9 — Shift calculation** (`app.py`). The server computes each layer's pixel shift proportional to its depth index (`dx = -x × PARALLAX_STRENGTH × depth_weight`). Deeper layers shift less, nearer layers shift more. The Z component maps to a per-layer scale factor for dolly zoom. These shifts are passed to `compositing.py`.
+
+**Stage 10 — Compositing** (`compositing.py`). Each layer is translated and scaled using a 2×3 transformation matrix, then blended back-to-front with alpha compositing. During blending, a coverage buffer tracks how much each pixel has been covered. After all layers are composited, any pixel with coverage below 0.99 is a gap. These gaps are filled using the Telea inpainting algorithm, which traverses outward from gap edges in a BFS-like order, computing each missing pixel's colour as a distance-weighted average of its known neighbours. The result is a single composited image.
+
+   **Transformation matrix.** Each layer is shifted and scaled by a 2×3 matrix:
+
+   ```
+   M = [[scale,  0,     dx],
+        [0,      scale, dy]]
+   ```
+
+   Column 1 and 2 control X/Y scaling, column 3 controls X/Y translation. This tells each pixel: move by (dx, dy) and scale by the given factor, all in one operation.
+
+   **Alpha compositing.** Each layer only covers part of the image — the rest is transparent (alpha = 0). Alpha compositing uses the alpha channel to decide which pixels to draw and which to skip, so transparent regions let the layers behind show through instead of appearing as black. Layers are blended one at a time from the farthest background to the nearest foreground, producing the final composited frame.
+
+   **Gap inpainting.** Gaps are filled by OpenCV's `cv2.inpaint(image, mask, radius, cv2.INPAINT_TELEA)`:
+   - `image` — the composited frame with gaps
+   - `mask` — binary mask marking which pixels are gaps (coverage < 0.99)
+   - `radius` — how far (in pixels) the algorithm looks for known pixels to fill from (set to 5)
+   - `INPAINT_TELEA` — selects the Telea algorithm
+
+   The algorithm works like BFS: it starts from the edges of each gap where known pixels exist, then fills inward one pixel at a time. Each missing pixel's colour is computed as a weighted average of its known neighbours, with closer neighbours weighted more heavily. This produces a smooth fill that extends the surrounding colours into the gap.
+**Stage 11 — Streaming** (`app.py`). The composited image is encoded as JPEG and sent back over WebSocket. If the head hasn't moved enough since the last frame, the cached JPEG is reused to save CPU.
 
 ---
 
@@ -54,21 +79,23 @@ _— to be completed by teammate_
 
 **Mountains** — 4 layers auto-detected
 
-![Original](depth-mapper/images/mountains.jpg)
+| Original | Depth map |
+| -------- | --------- |
+| ![Original](0_source_images/mountains.jpg) | ![Depth map](1_depth_maps/depth_mountains_run1.png) |
 
 | Layer 0 (background)                                   | Layer 1                                                | Layer 2                                                | Layer 3 (foreground)                                   |
 | ------------------------------------------------------ | ------------------------------------------------------ | ------------------------------------------------------ | ------------------------------------------------------ |
-| ![Layer 0](depth-mapper/layers/mountains/layer_00.png) | ![Layer 1](depth-mapper/layers/mountains/layer_01.png) | ![Layer 2](depth-mapper/layers/mountains/layer_02.png) | ![Layer 3](depth-mapper/layers/mountains/layer_03.png) |
+| ![Layer 0](2_layers/mountains/layer_00.png) | ![Layer 1](2_layers/mountains/layer_01.png) | ![Layer 2](2_layers/mountains/layer_02.png) | ![Layer 3](2_layers/mountains/layer_03.png) |
 
 ### Parallax in action
 
-> TODO: embed GIF or screen recording of the parallax viewer. Either screen-record `web_viewer.py` in the browser, or add an export step to `depth_processing.py` that captures a few frames at different mouse positions.
+<img src="assets/in_action.gif" alt="Parallax in action" width="800">
 
 ---
 
 ## Features
 
-- **Head-tracked parallax** — webcam feeds head position in real time; moving your head left/right/up/down shifts layers at depth-proportional speeds, producing the illusion of 3D depth without a headset.
+- **Head-tracked parallax** — webcam feeds head position in real time; moving your head left/right/up/down shifts layers at depth-proportional speeds, and moving closer/farther scales layers to simulate dolly zoom, producing the illusion of 3D depth without a headset.
 - **Mouse fallback** — full parallax control via mouse hover when no camera is available; scroll wheel controls zoom.
 - **Automatic depth segmentation** — the pipeline estimates how many layers the scene naturally contains from its depth histogram, then uses spatial k-means to cut clean, contiguous regions rather than thin noisy slices.
 - **Morphological mask refinement** — closing, erosion, and dilation passes clean mask edges and pre-fill the gaps that parallax shifting would otherwise expose.
@@ -79,10 +106,11 @@ _— to be completed by teammate_
 
 ## Evaluation
 
-**Works well on:**
+**Works well:**
 
-- Scenes with clear foreground/background separation — portraits, objects on tables, animals against simple backgrounds.
-- Images where the depth model produces confident, noiseless gradients with distinct depth modes in the histogram.
+- **Head tracking** — MediaPipe Face Mesh is highly robust across different lighting conditions, face angles, and distances. Tracking rarely drops even with partial occlusion or fast movement.
+- **Shift calculation** — the per-layer depth-proportional shifting produces a convincing parallax effect. The exponential smoothing eliminates jitter while keeping the response feeling immediate.
+- **Depth segmentation** — scenes with clear foreground/background separation (portraits, objects on tables, animals against simple backgrounds) produce clean layer boundaries with distinct depth modes in the histogram.
 
 **Struggles with:**
 
@@ -90,3 +118,5 @@ _— to be completed by teammate_
 - **Transparent and reflective surfaces** — depth models trained on standard scenes predict unreliable depth for glass, mirrors, and water, producing noisy or inverted depth values.
 - **Fine structures** — hair, fences, and foliage have sub-pixel depth variation that the model smears; mask boundaries cut through strands rather than around them, leaving fringe artefacts.
 - **Very similar depth layers** — when adjacent layers differ by only a few depth values, k-means placement is sensitive to initialisation and can produce uneven splits.
+- **Limited depth map resolution** — Depth Anything V2 outputs at a fixed resolution (typically 518×518), so high-resolution input images are downscaled before depth estimation. The depth map is then upscaled back to the original size, which can introduce blurriness and loss of fine edge detail in the segmented layers.
+- **Real-time compositing performance** — every frame is composited server-side in Python (NumPy + OpenCV), which is significantly slower than GPU-based rendering. With more layers or higher resolution images, frame rate drops noticeably. The WebSocket round-trip (browser → server → composite → JPEG encode → browser) adds further latency compared to a purely client-side approach.

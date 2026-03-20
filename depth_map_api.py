@@ -9,8 +9,8 @@ def main():
         sys.exit(1)
 
     filename = sys.argv[1]
-    images_dir = "./images"
-    depth_maps_dir = "./depth_maps"
+    images_dir = "./0_source_images"
+    depth_maps_dir = "./1_depth_maps"
     input_path = os.path.join(images_dir, filename)
 
     if not os.path.isfile(input_path):

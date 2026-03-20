@@ -25,12 +25,12 @@ env/
 *.avi
 
 # Generated outputs (can be reproduced)
-depth-mapper/depth_maps/
-depth-mapper/layers/
+1_depth_maps/
+2_layers/
 
 # User uploads and selfies
-depth-mapper/images/selfie*.jpg
-depth-mapper/images/screenshot*.jpg
+0_source_images/selfie*.jpg
+0_source_images/screenshot*.jpg
 
 # Claude
 CLAUDE.md

@@ -1,7 +1,7 @@
 """
 run.py  —  End-to-end parallax pipeline
 
-Give it an image filename (inside ./images/) and it will:
+Give it an image filename (inside ./0_source_images/) and it will:
     1. Estimate the depth map via the HuggingFace API  (skipped if one already exists)
     2. Segment into RGBA layers  (k-means)
 
@@ -23,8 +23,8 @@ from shutil import copy2
 from layer_segmentation import segment_layers, save_layers, save_depth_coloured, save_depth_histogram, estimate_num_layers
 from compositing import precompute_layers, composite
 
-IMAGES_DIR        = "./images"
-DEPTH_DIR         = "./depth_maps"
+IMAGES_DIR        = "./0_source_images"
+DEPTH_DIR         = "./1_depth_maps"
 DISPLAY_MAX_WIDTH = 900
 PARALLAX_STRENGTH = 20
 
@@ -71,7 +71,7 @@ def build_layers(image_bgr: np.ndarray, depth_map: np.ndarray, num_layers: int |
         num_layers = estimate_num_layers(depth_map)
         print(f"Auto-detected {num_layers} depth layers from histogram.")
 
-    out_dir = os.path.join("./layers", stem)
+    out_dir = os.path.join("./2_layers", stem)
     os.makedirs(out_dir, exist_ok=True)
 
     # Remove stale layer files from any previous run with a different layer count

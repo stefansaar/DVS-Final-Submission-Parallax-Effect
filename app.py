@@ -1,13 +1,12 @@
 """
-web_viewer.py
+app.py
 
 Browser-based parallax viewer with head tracking via WebSocket.
 Reuses compositing pipeline from compositing.py and serves a MediaPipe
 Face Mesh frontend that sends head position over WebSocket.
 
 Usage:
-    cd depth-mapper
-    python web_viewer.py
+    python app.py
     # Open http://localhost:5002
 """
 
@@ -19,7 +18,7 @@ import uuid
 
 import cv2
 import numpy as np
-from flask import Flask, render_template, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, send_file
 from werkzeug.utils import secure_filename
 
 # WebSocket support
@@ -64,7 +63,7 @@ state = {
 }
 
 
-def find_layer_cases(layers_dir="./layers"):
+def find_layer_cases(layers_dir="./2_layers"):
     """Find all stems that have pre-processed layer PNGs."""
     cases = []
     for d in sorted(g.glob(os.path.join(layers_dir, "*"))):
@@ -76,7 +75,7 @@ def find_layer_cases(layers_dir="./layers"):
     return cases
 
 
-def _load_raw_layers(stem, layers_dir="./layers"):
+def _load_raw_layers(stem, layers_dir="./2_layers"):
     """Read layer PNGs from disk and cache at full resolution."""
     if stem in state["raw_layers_cache"]:
         return state["raw_layers_cache"][stem]
@@ -138,7 +137,7 @@ def load_case(stem, max_w=None, max_h=None):
 # ---------------------------------------------------------------------------
 @app.route("/")
 def index():
-    return render_template("viewer.html")
+    return send_file("viewer.html")
 
 
 @app.route("/api/cases")
@@ -150,9 +149,9 @@ def api_cases():
 def api_raw(stem):
     """Serve the original source image."""
     for ext in (".jpg", ".jpeg", ".png", ".webp"):
-        path = os.path.join("./images", stem + ext)
+        path = os.path.join("./0_source_images", stem + ext)
         if os.path.isfile(path):
-            return send_from_directory("./images", stem + ext)
+            return send_from_directory("./0_source_images", stem + ext)
     return jsonify({"error": "not found"}), 404
 
 
@@ -167,7 +166,7 @@ def api_upload():
 
     safe = secure_filename(f.filename)
     stem = os.path.splitext(safe)[0].lower()
-    save_path = os.path.join("./images", stem + ".jpg")
+    save_path = os.path.join("./0_source_images", stem + ".jpg")
     f.save(save_path)
 
     job_id = str(uuid.uuid4())[:8]
@@ -199,7 +198,7 @@ def _run_pipeline(job_id, stem):
     try:
         job["progress"] = "Waiting for pipeline lock..."
         with state["pipeline_lock"]:
-            image_path = os.path.join("./images", stem + ".jpg")
+            image_path = os.path.join("./0_source_images", stem + ".jpg")
             image_bgr = cv2.imread(image_path)
             if image_bgr is None:
                 raise RuntimeError(f"Failed to read {image_path}")
@@ -212,8 +211,8 @@ def _run_pipeline(job_id, stem):
             client = Client("saarstefan/depth-mapping-test")
             result = client.predict(handle_file(image_path), api_name="/estimate_depth")
 
-            os.makedirs("./depth_maps", exist_ok=True)
-            depth_path = os.path.join("./depth_maps", f"depth_{stem}_run1.png")
+            os.makedirs("./1_depth_maps", exist_ok=True)
+            depth_path = os.path.join("./1_depth_maps", f"depth_{stem}_run1.png")
             copy2(result, depth_path)
 
             # 2. Load depth map
@@ -225,7 +224,7 @@ def _run_pipeline(job_id, stem):
 
             # 4. Save layers
             job["progress"] = "Saving layers..."
-            layer_dir = os.path.join("./layers", stem)
+            layer_dir = os.path.join("./2_layers", stem)
             save_layers(layers, layer_dir)
 
             # 5. Update state
@@ -370,7 +369,7 @@ if __name__ == "__main__":
     cases = find_layer_cases()
     if not cases:
         print("No pre-processed layers found in ./layers/")
-        print("Run from inside depth-mapper/")
+        print("Run from the project root directory")
         sys.exit(1)
 
     state["cases"] = cases
