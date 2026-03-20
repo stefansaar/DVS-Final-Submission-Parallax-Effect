@@ -15,8 +15,6 @@ Usage (CLI):
     python layer_segmentation.py <image_path> <depth_map_path> [num_layers]
 
     Saves each RGBA layer as a PNG in ./layers/<stem>/layer_00.png ... layer_N.png
-    Also saves a visualisation of the depth boundaries as depth_bands.png.
-
 Usage (library):
     from layer_segmentation import segment_layers
 
@@ -29,19 +27,29 @@ import sys
 import numpy as np
 import cv2
 from sklearn.cluster import KMeans
-from depth_processing import clean_depth_map
 
 
 # ---------------------------------------------------------------------------
 # Core segmentation
 # ---------------------------------------------------------------------------
 
-def depth_to_label_map(depth_map: np.ndarray, num_layers: int) -> np.ndarray:
+def depth_to_label_map(depth_map: np.ndarray, num_layers: int,
+                       spatial_weight: float = 0.1) -> np.ndarray:
     """
-    Cluster a depth map into N layers using k-means, returning a label map.
+    Cluster a depth map into N layers using k-means on {depth, x, y} features.
+
+    Adding spatial coordinates penalises splitting contiguous regions that have
+    slightly different depth values, reducing thin edge-sliver layers.
 
     Every pixel is assigned exactly one integer label 0..N-1.
     Label 0 = farthest background, label N-1 = nearest foreground.
+
+    Args:
+        depth_map:      (H, W) 2D array.
+        num_layers:     Number of clusters.
+        spatial_weight: Weight of (x, y) coordinates relative to depth.
+                        0.0 = depth only (original behaviour).
+                        0.3 = moderate spatial grouping (recommended).
 
     Returns:
         (H, W) int32 array with values in 0..num_layers-1.
@@ -50,13 +58,25 @@ def depth_to_label_map(depth_map: np.ndarray, num_layers: int) -> np.ndarray:
         raise ValueError(f"depth_map must be 2D, got shape {depth_map.shape}")
 
     h, w = depth_map.shape
-    pixels = depth_map.astype(np.float32).reshape(-1, 1)
+    # Normalise depth to [0, 1]
+    pixels = depth_map.astype(np.float32).reshape(-1, 1) / 255.0
+
+    if spatial_weight > 0:
+        yy, xx = np.mgrid[0:h, 0:w]
+        coords = np.stack([
+            xx.ravel() / w,
+            yy.ravel() / h,
+        ], axis=1).astype(np.float32) * spatial_weight
+        pixels = np.hstack([pixels, coords])
 
     kmeans = KMeans(n_clusters=num_layers, random_state=0, n_init="auto")
     labels = kmeans.fit_predict(pixels)
-    centers = kmeans.cluster_centers_.flatten()
 
-    sorted_ids = np.argsort(centers)
+    # Sort clusters by mean depth (not centroid, since centroid is now 3D)
+    mean_depths = np.array([
+        depth_map.ravel()[labels == i].mean() for i in range(num_layers)
+    ])
+    sorted_ids = np.argsort(mean_depths)
     rank = np.empty_like(sorted_ids)
     rank[sorted_ids] = np.arange(num_layers)
 
@@ -150,22 +170,7 @@ def label_map_to_masks(label_map: np.ndarray, num_labels: int) -> list[np.ndarra
     ]
 
 
-def normalise_depth_range(depth_map: np.ndarray) -> np.ndarray:
-    """
-    Stretch the occupied depth range to fill 0-255.
-
-    Clips to the 1st-99th percentile so extreme outlier pixels don't compress
-    the useful depth range into a narrow band, wasting k-means clusters.
-    """
-    lo = float(np.percentile(depth_map, 1))
-    hi = float(np.percentile(depth_map, 99))
-    if hi <= lo:
-        return depth_map
-    clipped = np.clip(depth_map.astype(np.float32), lo, hi)
-    return ((clipped - lo) / (hi - lo) * 255.0).astype(np.uint8)
-
-
-def estimate_num_layers(depth_map: np.ndarray, min_k: int = 3, max_k: int = 7) -> int:
+def estimate_num_layers(depth_map: np.ndarray, min_k: int = 4, max_k: int = 7) -> int:
     """
     Estimate the natural number of depth layers from the image's depth histogram.
 
@@ -185,7 +190,7 @@ def estimate_num_layers(depth_map: np.ndarray, min_k: int = 3, max_k: int = 7) -
     for _ in range(3):
         smoothed = np.convolve(smoothed, kernel, mode='same')
 
-    threshold = 0.10 * smoothed.max()
+    threshold = 0.05 * smoothed.max()
     peaks = [
         i for i in range(1, len(smoothed) - 1)
         if smoothed[i] > smoothed[i - 1]
@@ -230,9 +235,6 @@ def segment_layers(
     """
     Full pipeline: depth map + image → list of RGBA layers ordered back-to-front.
 
-    Depth map should already be cleaned (bilateral filter + edge sharpening) before
-    calling this. Call clean_depth_map() from depth_processing.py first.
-
     Args:
         image_bgr:  BGR uint8 array (H, W, 3).
         depth_map:  Grayscale uint8 or float array (H, W).
@@ -260,9 +262,6 @@ def segment_layers(
     if depth_u8.shape[:2] != (h, w):
         depth_u8 = cv2.resize(depth_u8, (w, h), interpolation=cv2.INTER_LINEAR)
 
-    # Stretch occupied depth range so k-means clusters aren't wasted on empty bands
-    depth_u8 = normalise_depth_range(depth_u8)
-
     if num_layers is None:
         num_layers = estimate_num_layers(depth_u8)
         print(f"  Auto-detected {num_layers} depth layers from histogram.")
@@ -274,6 +273,16 @@ def segment_layers(
     label_map = clean_label_map(label_map)
 
     masks = label_map_to_masks(label_map, num_layers)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    for i in range(num_layers):
+        masks[i] = cv2.morphologyEx(masks[i], cv2.MORPH_CLOSE, kernel)
+
+    for i in range(num_layers - 1):       # every layer with something in front: pull back
+        masks[i] = cv2.erode(masks[i], kernel, iterations=1)
+    for i in range(1, num_layers):        # every layer with something behind: expand to cover
+        masks[i] = cv2.dilate(masks[i], kernel, iterations=1)
+
     return masks_to_rgba_layers(image_bgr, masks)
 
 
@@ -306,69 +315,64 @@ def save_depth_coloured(depth_map: np.ndarray, out_path: str) -> None:
     print(f"  Saved coloured depth map: {out_path}")
 
 
-def save_depth_bands(depth_map: np.ndarray, num_layers: int, out_path: str) -> None:
-    """Save a false-colour visualisation with depth band boundary lines overlaid."""
-    depth_u8 = depth_map if depth_map.dtype == np.uint8 else (
-        ((depth_map - depth_map.min()) / (depth_map.max() - depth_map.min() + 1e-8) * 255)
-        .clip(0, 255).astype(np.uint8)
-    )
-    coloured = cv2.applyColorMap(depth_u8, cv2.COLORMAP_TURBO)
+def save_depth_histogram(depth_map: np.ndarray, num_layers: int, out_path: str) -> None:
+    """Save a histogram of depth values with smoothed curve, detected peaks, and layer boundaries."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-    h, w = coloured.shape[:2]
-    thresholds = np.linspace(0, 255, num_layers + 1)[1:-1]
-    for t in thresholds:
-        x = int(t / 255 * (w - 1))
-        cv2.line(coloured, (x, 0), (x, h - 1), (255, 255, 255), 1)
+    lo = float(np.percentile(depth_map, 1))
+    hi = float(np.percentile(depth_map, 99))
 
-    cv2.imwrite(out_path, coloured)
-    print(f"  Saved depth bands visualisation: {out_path}")
+    hist, bin_edges = np.histogram(depth_map, bins=64, range=(lo, hi))
+    bin_centres = (bin_edges[:-1] + bin_edges[1:]) / 2
+    hist_f = hist.astype(np.float32)
 
+    kernel = np.array([1, 4, 6, 4, 1], dtype=np.float32)
+    kernel /= kernel.sum()
+    smoothed = hist_f.copy()
+    for _ in range(3):
+        smoothed = np.convolve(smoothed, kernel, mode='same')
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
+    threshold = 0.05 * smoothed.max()
+    peaks = [
+        i for i in range(1, len(smoothed) - 1)
+        if smoothed[i] > smoothed[i - 1]
+        and smoothed[i] > smoothed[i + 1]
+        and smoothed[i] > threshold
+    ]
 
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: python layer_segmentation.py <image_path> <depth_map_path> [num_layers]")
-        sys.exit(1)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(bin_centres, hist_f, width=(bin_centres[1] - bin_centres[0]),
+           color="#4a90d9", alpha=0.5, label="Raw histogram")
+    ax.plot(bin_centres, smoothed, color="#e05c2a", linewidth=2, label="Smoothed")
 
-    image_path = sys.argv[1]
-    depth_path = sys.argv[2]
-    num_layers = int(sys.argv[3]) if len(sys.argv) >= 4 else None
+    for p in peaks:
+        ax.axvline(bin_centres[p], color="#2ca02c", linewidth=1.5, linestyle="--", alpha=0.8)
+    if peaks:
+        ax.axvline(bin_centres[peaks[0]], color="#2ca02c", linewidth=1.5,
+                   linestyle="--", alpha=0.8, label=f"Detected peaks ({len(peaks)})")
 
-    if not os.path.isfile(image_path):
-        print(f"Error: image not found: {image_path}"); sys.exit(1)
-    if not os.path.isfile(depth_path):
-        print(f"Error: depth map not found: {depth_path}"); sys.exit(1)
+    boundaries = np.linspace(lo, hi, num_layers + 1)[1:-1]
+    for b in boundaries:
+        ax.axvline(b, color="#9467bd", linewidth=1.2, linestyle=":", alpha=0.9)
+    if len(boundaries):
+        ax.axvline(boundaries[0], color="#9467bd", linewidth=1.2,
+                   linestyle=":", alpha=0.9, label=f"Layer boundaries (k={num_layers})")
 
-    image_bgr = cv2.imread(image_path)
-    depth_map = cv2.imread(depth_path, cv2.IMREAD_GRAYSCALE)
+    ax.axhline(threshold, color="gray", linewidth=1, linestyle="-.",
+               alpha=0.6, label=f"Peak threshold ({threshold:.0f})")
 
-    if image_bgr is None:
-        print("Error: could not read image."); sys.exit(1)
-    if depth_map is None:
-        print("Error: could not read depth map."); sys.exit(1)
-
-    print(f"Image:     {image_bgr.shape[1]}x{image_bgr.shape[0]}")
-    print(f"Depth map: {depth_map.shape[1]}x{depth_map.shape[0]}")
-
-    stem    = os.path.splitext(os.path.basename(image_path))[0]
-    out_dir = os.path.join("./layers", stem)
-
-    print("Cleaning depth map...")
-    cleaned = clean_depth_map(depth_map, image_bgr)
-
-    layers = segment_layers(image_bgr, cleaned, num_layers)
-    n = len(layers)
-
-    print(f"\nSaving to {out_dir}/")
-    save_depth_coloured(depth_map, os.path.join(out_dir, "depth_original.png"))
-    save_depth_coloured(cleaned,   os.path.join(out_dir, "depth_cleaned.png"))
-    save_depth_bands(normalise_depth_range(cleaned), n, os.path.join(out_dir, "depth_bands.png"))
-    save_layers(layers, out_dir)
-    print("\nDone.")
+    ax.set_xlabel("Depth value (0 = far, 255 = near)")
+    ax.set_ylabel("Pixel count")
+    ax.set_title(f"Depth histogram  —  {num_layers} layers")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    print(f"  Saved depth histogram: {out_path}")
 
 
 if __name__ == "__main__":
-    main()
+    print("Use run.py to run the full pipeline.")
+    sys.exit(0)

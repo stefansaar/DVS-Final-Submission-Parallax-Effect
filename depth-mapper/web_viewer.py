@@ -35,7 +35,6 @@ from compositing import (
     precompute_layers, composite,
     PARALLAX_STRENGTH,
 )
-from depth_processing import clean_depth_map
 from layer_segmentation import segment_layers, save_layers
 
 app = Flask(__name__)
@@ -217,14 +216,12 @@ def _run_pipeline(job_id, stem):
             depth_path = os.path.join("./depth_maps", f"depth_{stem}_run1.png")
             copy2(result, depth_path)
 
-            # 2. Clean depth map
-            job["progress"] = "Cleaning depth map..."
+            # 2. Load depth map
             depth_map = cv2.imread(depth_path, cv2.IMREAD_GRAYSCALE)
-            cleaned = clean_depth_map(depth_map, image_bgr)
 
             # 3. Segment layers
             job["progress"] = "Segmenting layers..."
-            layers = segment_layers(image_bgr, cleaned, num_layers=None)
+            layers = segment_layers(image_bgr, depth_map, num_layers=None)
 
             # 4. Save layers
             job["progress"] = "Saving layers..."

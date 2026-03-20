@@ -1,139 +1,165 @@
 """
-depth_processing.py
+run.py  —  End-to-end parallax pipeline
 
-Post-processing functions to clean up a depth map before layer segmentation.
+Give it an image filename (inside ./images/) and it will:
+    1. Estimate the depth map via the HuggingFace API  (skipped if one already exists)
+    2. Segment into RGBA layers  (k-means)
 
-Two steps:
-    1. bilateral_filter    — smooth noise within objects, preserve edges
-    2. edge_guided_sharpen — snap depth boundaries to real object edges from RGB
+Usage:
+    python run.py <image_filename> [num_layers]
 
-Main function to call:
-    clean_depth_map(depth_map, image_bgr) -> cleaned depth map
-
-Usage (CLI, saves a side-by-side comparison):
-    python depth_processing.py <image_path> <depth_map_path>
+Examples:
+    python run.py josh.jpg
+    python run.py josh.jpg 8
+    python run.py josh.jpg 5 --rerun-depth   # force re-run depth estimation
 """
 
 import os
 import sys
+import glob
 import cv2
 import numpy as np
+from shutil import copy2
+from layer_segmentation import segment_layers, save_layers, save_depth_coloured, save_depth_histogram, estimate_num_layers
+from compositing import precompute_layers, composite
 
-
-def bilateral_filter(
-    depth_map: np.ndarray,
-    d: int = 9,
-    sigma_color: float = 50,
-    sigma_space: float = 75,
-) -> np.ndarray:
-    """
-    Smooth noise within depth regions while preserving sharp edges between them.
-
-    Unlike Gaussian blur, bilateral filter only averages pixels that are both
-    spatially close AND have similar depth values. Pixels across a depth boundary
-    are not averaged together, so object edges stay sharp.
-
-    Args:
-        depth_map:   Grayscale uint8 array (H, W).
-        d:           Neighbourhood diameter in pixels.
-        sigma_color: How different two depth values can be before the filter
-                     stops averaging them. Higher = more smoothing across edges.
-        sigma_space: Spatial spread (like sigma in a Gaussian).
-
-    Returns:
-        Filtered depth map, same shape and dtype as input.
-    """
-    return cv2.bilateralFilter(depth_map, d=d, sigmaColor=sigma_color, sigmaSpace=sigma_space)
-
-
-def edge_guided_sharpen(
-    depth_map: np.ndarray,
-    image_bgr: np.ndarray,
-    canny_low: int = 50,
-    canny_high: int = 150,
-    edge_dilate: int = 2,
-    sharpen_strength: float = 3.0,
-) -> np.ndarray:
-    """
-    Sharpen depth boundaries by snapping them to real object edges from the RGB image.
-
-    The depth model produces soft transitions at object boundaries. This function
-    uses Canny edge detection on the original photo to find where real edges are,
-    then applies unsharp masking specifically at those locations to make the depth
-    jump more abruptly — giving cleaner layer cuts.
-
-    Args:
-        depth_map:        Grayscale uint8 array (H, W).
-        image_bgr:        Original BGR image (H, W, 3).
-        canny_low:        Lower threshold for Canny hysteresis.
-        canny_high:       Upper threshold for Canny hysteresis.
-        edge_dilate:      How many pixels to dilate detected edges outward.
-                          Creates a narrow zone around each edge where sharpening applies.
-        sharpen_strength: How aggressively to push depth values apart at edges.
-                          1.0 = subtle, 2.0-3.0 = noticeable, >4 = may clip.
-
-    Returns:
-        Sharpened depth map, same shape and dtype as input.
-    """
-    # Detect edges in the RGB image
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, canny_low, canny_high)
-
-    # Dilate edges to create a narrow boundary zone
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    edge_mask = cv2.dilate(edges, kernel, iterations=edge_dilate)
-
-    # Unsharp mask: amplify high-frequency depth detail at edge locations
-    # sharpened = original + strength * (original - blurred)
-    depth_f = depth_map.astype(np.float32)
-    blurred = cv2.GaussianBlur(depth_f, (0, 0), sigmaX=3)
-    sharpened = depth_f + sharpen_strength * (depth_f - blurred)
-    sharpened = sharpened.clip(0, 255).astype(np.uint8)
-
-    # Only apply sharpening where edges were detected
-    result = depth_map.copy()
-    result[edge_mask > 0] = sharpened[edge_mask > 0]
-
-    return result
-
-
-def clean_depth_map(
-    depth_map: np.ndarray,
-    image_bgr: np.ndarray,
-) -> np.ndarray:
-    """
-    Full depth map cleanup pipeline: bilateral filter then edge-guided sharpening.
-
-    Args:
-        depth_map:  Grayscale uint8 array (H, W).
-        image_bgr:  Original BGR image (H, W, 3), used for edge detection.
-
-    Returns:
-        Cleaned depth map, same shape and dtype as input.
-    """
-    # Ensure image matches depth map size before edge detection
-    dh, dw = depth_map.shape[:2]
-    ih, iw = image_bgr.shape[:2]
-    if (ih, iw) != (dh, dw):
-        image_bgr = cv2.resize(image_bgr, (dw, dh), interpolation=cv2.INTER_AREA)
-
-    depth = bilateral_filter(depth_map)
-    depth = edge_guided_sharpen(depth, image_bgr)
-    return depth
+IMAGES_DIR        = "./images"
+DEPTH_DIR         = "./depth_maps"
+DISPLAY_MAX_WIDTH = 900
+PARALLAX_STRENGTH = 20
 
 
 # ---------------------------------------------------------------------------
-# CLI — saves a before/after comparison image
+# Step 1 — Depth estimation
+# ---------------------------------------------------------------------------
+
+def find_existing_depth(stem: str) -> str | None:
+    """Return the most recent depth map for this image stem, or None."""
+    pattern = os.path.join(DEPTH_DIR, f"depth_{stem}_run*.png")
+    matches = sorted(glob.glob(pattern))
+    return matches[-1] if matches else None
+
+
+def run_depth_estimation(image_path: str, stem: str) -> str:
+    """Call the HuggingFace API and save the depth map. Returns the saved path."""
+    from gradio_client import Client, handle_file
+
+    os.makedirs(DEPTH_DIR, exist_ok=True)
+
+    n = 1
+    while True:
+        out_path = os.path.join(DEPTH_DIR, f"depth_{stem}_run{n}.png")
+        if not os.path.exists(out_path):
+            break
+        n += 1
+
+    print("Connecting to HuggingFace Space for depth estimation...")
+    client = Client("saarstefan/depth-mapping-test")
+    print(f"Estimating depth for {image_path} ...")
+    result = client.predict(handle_file(image_path), api_name="/estimate_depth")
+    copy2(result, out_path)
+    print(f"Depth map saved: {out_path}")
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Step 2-3 — Segmentation (clean + split into layers)
+# ---------------------------------------------------------------------------
+
+def build_layers(image_bgr: np.ndarray, depth_map: np.ndarray, num_layers: int | None, stem: str):
+    if num_layers is None:
+        num_layers = estimate_num_layers(depth_map)
+        print(f"Auto-detected {num_layers} depth layers from histogram.")
+
+    out_dir = os.path.join("./layers", stem)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Remove stale layer files from any previous run with a different layer count
+    for old_file in glob.glob(os.path.join(out_dir, "layer_*.png")):
+        os.remove(old_file)
+
+    save_depth_coloured(depth_map, os.path.join(out_dir, "depth_original.png"))
+    save_depth_histogram(depth_map, num_layers, os.path.join(out_dir, "depth_histogram.png"))
+
+    print(f"Segmenting into {num_layers} layers (k-means)...")
+    layers = segment_layers(image_bgr, depth_map, num_layers=num_layers)
+    save_layers(layers, out_dir)
+    print(f"Layers saved to {out_dir}/")
+    return layers, num_layers
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — Parallax viewer
+# ---------------------------------------------------------------------------
+
+def run_viewer(image_bgr: np.ndarray, layers: list, num_layers: int):
+    h, w = image_bgr.shape[:2]
+    float_layers = precompute_layers(layers)
+    mouse = {"x": w // 2, "y": h // 2}
+
+    def on_mouse(_event, x, y, _flags, _param):
+        mouse["x"] = x
+        mouse["y"] = y
+
+    print("Opening viewer — move your mouse to test the effect. Press Q to quit.")
+    cv2.namedWindow("Parallax")
+    cv2.setMouseCallback("Parallax", on_mouse)
+
+    while True:
+        offset_x = (mouse["x"] - w / 2) / (w / 2)
+        offset_y = (mouse["y"] - h / 2) / (h / 2)
+
+        shifts = []
+        for i in range(num_layers):
+            depth_weight = i / max(num_layers - 1, 1)
+            dx = -offset_x * PARALLAX_STRENGTH * depth_weight
+            dy = -offset_y * PARALLAX_STRENGTH * depth_weight
+            shifts.append((dx, dy))
+
+        frame = composite(float_layers, shifts, h, w)
+        cv2.imshow("Parallax", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cv2.destroyAllWindows()
+
+
+# ---------------------------------------------------------------------------
+# Main
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: python depth_processing.py <image_path> <depth_map_path>")
+    if len(sys.argv) < 2:
+        print("Usage: python run.py <image_filename> [num_layers] [--rerun-depth]")
         sys.exit(1)
 
-    image_path = sys.argv[1]
-    depth_path = sys.argv[2]
+    filename   = sys.argv[1]
+    num_layers = None  # None = auto-detect from depth histogram
+    rerun      = "--rerun-depth" in sys.argv
+    no_viewer  = "--no-viewer" in sys.argv
 
+    for arg in sys.argv[2:]:
+        if arg.isdigit():
+            num_layers = int(arg)
+
+    image_path = os.path.join(IMAGES_DIR, filename)
+    if not os.path.isfile(image_path):
+        print(f"Error: image not found at {image_path}")
+        sys.exit(1)
+
+    stem = os.path.splitext(filename)[0]
+
+    # --- Step 1: depth map ---
+    existing = find_existing_depth(stem)
+    if existing and not rerun:
+        print(f"Found existing depth map: {existing}  (use --rerun-depth to regenerate)")
+        depth_path = existing
+    else:
+        depth_path = run_depth_estimation(image_path, stem)
+
+    # --- Load both ---
+    print("Loading image and depth map...")
     image_bgr = cv2.imread(image_path)
     depth_map = cv2.imread(depth_path, cv2.IMREAD_GRAYSCALE)
 
@@ -142,46 +168,26 @@ def main():
     if depth_map is None:
         print(f"Error: could not read depth map: {depth_path}"); sys.exit(1)
 
-    # Resize depth to match image if needed
-    h, w = image_bgr.shape[:2]
-    if depth_map.shape[:2] != (h, w):
-        depth_map = cv2.resize(depth_map, (w, h), interpolation=cv2.INTER_LINEAR)
+    # Resize for performance
+    orig_h, orig_w = image_bgr.shape[:2]
+    if orig_w > DISPLAY_MAX_WIDTH:
+        scale     = DISPLAY_MAX_WIDTH / orig_w
+        image_bgr = cv2.resize(image_bgr, (DISPLAY_MAX_WIDTH, int(orig_h * scale)), interpolation=cv2.INTER_AREA)
+        depth_map = cv2.resize(depth_map, (DISPLAY_MAX_WIDTH, int(orig_h * scale)), interpolation=cv2.INTER_LINEAR)
+        print(f"Resized to {DISPLAY_MAX_WIDTH}x{int(orig_h * scale)} for display")
 
-    print("Applying bilateral filter...")
-    after_bilateral = bilateral_filter(depth_map)
+    # --- Step 2-3: segment ---
+    layers, num_layers = build_layers(image_bgr, depth_map, num_layers, stem)
 
-    print("Applying edge-guided sharpening...")
-    after_sharpen = edge_guided_sharpen(after_bilateral, image_bgr)
+    # --- Step 4: viewer ---
+    if not no_viewer:
+        run_viewer(image_bgr, layers, num_layers)
 
-    # Save a side-by-side: original | after bilateral | after sharpening
-    # Convert all to colour for easier visual comparison
-    col_original  = cv2.applyColorMap(depth_map,       cv2.COLORMAP_TURBO)
-    col_bilateral = cv2.applyColorMap(after_bilateral,  cv2.COLORMAP_TURBO)
-    col_final     = cv2.applyColorMap(after_sharpen,    cv2.COLORMAP_TURBO)
-
-    def label(img, text):
-        out = img.copy()
-        cv2.putText(out, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        return out
-
-    comparison = np.hstack([
-        label(col_original,  "original"),
-        label(col_bilateral, "bilateral"),
-        label(col_final,     "edge sharpen"),
-    ])
-
-    stem = os.path.splitext(os.path.basename(depth_path))[0]
-    out_dir = os.path.join("./depth_processing_output")
-    os.makedirs(out_dir, exist_ok=True)
-
-    comparison_path = os.path.join(out_dir, f"{stem}_comparison.png")
-    cleaned_path    = os.path.join(out_dir, f"{stem}_cleaned.png")
-
-    cv2.imwrite(comparison_path, comparison)
-    cv2.imwrite(cleaned_path, after_sharpen)
-
-    print(f"Saved comparison: {comparison_path}")
-    print(f"Saved cleaned:    {cleaned_path}")
+    print("\nDone.")
+    print(f"  layers/{stem}/depth_original.png   — raw depth map from model")
+    print(f"  layers/{stem}/depth_histogram.png  — depth histogram with peaks and layer boundaries")
+    print(f"  layers/{stem}/layer_00.png        — background (farthest)")
+    print(f"  layers/{stem}/layer_{num_layers - 1:02d}.png        — foreground (nearest)")
 
 
 if __name__ == "__main__":
