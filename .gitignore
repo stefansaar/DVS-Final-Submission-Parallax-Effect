@@ -24,9 +24,6 @@ env/
 *.mp4
 *.avi
 
-# Generated outputs (can be reproduced)
-1_depth_maps/
-2_layers/
 
 # User uploads and selfies
 0_source_images/selfie*.jpg
