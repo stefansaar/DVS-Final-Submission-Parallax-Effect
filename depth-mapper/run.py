@@ -23,7 +23,7 @@ import numpy as np
 from shutil import copy2
 from layer_segmentation import segment_layers, save_layers, save_depth_coloured, save_depth_bands, estimate_num_layers, normalise_depth_range
 from depth_processing import clean_depth_map
-from test_parallax import precompute_layers, composite
+from compositing import precompute_layers, composite
 
 IMAGES_DIR        = "./images"
 DEPTH_DIR         = "./depth_maps"
